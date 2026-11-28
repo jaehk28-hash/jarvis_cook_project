@@ -247,6 +247,20 @@ def load_model(path):
     return labels, predict
 
 
+def v_shape_dir(hand):
+    """좌표 계산으로 브이 모양인지와 손가락 방향을 구합니다 (학습 없음, 손을 돌려도 동작).
+    검지·중지는 펴지고(끝이 둘째 마디보다 손목에서 멂) 약지·새끼는 접혔으면 브이.
+    방향 d: 손목 → 두 손가락 끝 가운데를 잇는 선의 세로 성분. -1 = 위, 0 = 옆, +1 = 아래."""
+    p = [(l.x, l.y) for l in hand.landmark]
+    dist = lambda a, b: ((p[a][0] - p[b][0]) ** 2 + (p[a][1] - p[b][1]) ** 2) ** 0.5
+    ext = lambda tip, pip: dist(0, tip) > dist(0, pip) * 1.1
+    fold = lambda tip, pip: dist(0, tip) < dist(0, pip)
+    is_v = ext(8, 6) and ext(12, 10) and fold(16, 14) and fold(20, 18)
+    mx, my = (p[8][0] + p[12][0]) / 2 - p[0][0], (p[8][1] + p[12][1]) / 2 - p[0][1]
+    n = (mx * mx + my * my) ** 0.5 or 1e-6
+    return is_v, my / n
+
+
 def to_screen(pos, w, h, area=0.7, center_y=0.5):
     """카메라 화면의 area 비율 영역을 모니터 전체로 늘려서 대응시킵니다 (절대 모드).
     center_y를 0.5보다 작게 하면 영역이 위로 올라가서, 손을 카메라 아래 끝까지 내리지 않아도 화면 아래에 닿습니다."""
@@ -306,6 +320,21 @@ class CursorMapper:
     def jump(self, xy):
         self.cursor = self._clip(*xy)
 
+    def scroll_tilt(self, t, d, speed=15, invert=False):
+        """브이가 위를 향하면 위로, 아래를 향하면 아래로 '초당 speed칸' 속도로 스크롤합니다.
+        유지한 시간만큼 스크롤 양이 늘어납니다. 옆으로 눕히면(|d| < 0.5) 멈춥니다."""
+        tp = getattr(self, 't_prev', None)
+        dt = 0.0 if tp is None or t - tp > 0.3 or t < tp else min(t - tp, 0.1)   # 끊겼다 다시 시작하면 0부터
+        self.t_prev = t
+        if abs(d) < 0.5:
+            self.t_acc = 0.0
+            return 0
+        rate = speed * min((abs(d) - 0.5) / 0.4, 1.0)   # 많이 기울일수록 빠르게 (최대 speed)
+        self.t_acc = getattr(self, 't_acc', 0.0) + (rate * dt if d < 0 else -rate * dt) * (-1 if invert else 1)
+        n = int(self.t_acc)
+        self.t_acc -= n
+        return n
+
     def scroll(self, t, pos, gain=150, invert=False):
         """브이 손을 위아래로 움직인 만큼 스크롤 칸 수를 돌려줍니다. 손을 내리면 페이지가 아래로 내려갑니다.
         0.25초 넘게 끊기면 새로 시작하므로 손을 다시 위로 가져와도 반대로 스크롤되지 않습니다."""
@@ -334,6 +363,9 @@ def main():
                         help='relative: 마우스처럼 움직인 만큼 이동(기본) / absolute: 손 위치 = 화면 위치')
     parser.add_argument('--gain', type=float, default=1.2, help='relative 모드 감도 (클수록 조금만 움직여도 멀리 감)')
     parser.add_argument('--area', type=float, default=0.4, help='absolute 모드에서 화면 전체에 대응할 카메라 영역 비율 (예전 값 0.7)')
+    parser.add_argument('--scroll-mode', choices=['tilt', 'move'], default='tilt',
+                        help='tilt: 브이 방향(위/옆/아래)으로 스크롤(기본) / move: 브이 손을 위아래로 움직여 스크롤')
+    parser.add_argument('--scroll-speed', type=float, default=15, help='tilt 모드 스크롤 속도 (초당 칸 수)')
     parser.add_argument('--scroll-gain', type=float, default=150, help='스크롤 감도 (커서 모드에서 브이로 스크롤)')
     parser.add_argument('--scroll-invert', action='store_true', help='스크롤 방향 반대로')
     parser.add_argument('--gain-y', type=float, default=1.2, help='세로 감도 배수 (아래쪽이 잘 안 가면 키움)')
@@ -374,6 +406,8 @@ def main():
     start_xy = tuple(pyautogui.position()) if pyautogui else None
     mapper = CursorMapper(screen_w, screen_h, args.cursor, args.gain, args.area, start_xy, args.gain_y, args.center_y)
     last_action, last_action_t, prev_t = '', 0.0, time.time()
+    last_scroll_t = -99.0
+    now_scrolling = lambda t: t - last_scroll_t < 0.4   # 최근 0.4초 안에 스크롤했으면 '스크롤 중'
     meter = Meter(prev_t) if args.log else None
     while True:
         ok, frame = cap.read()
@@ -381,7 +415,7 @@ def main():
             break
         frame = cv2.flip(frame, 1)
         result = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        label, conf, pos = 'none', 1.0, None
+        label, conf, pos, palm_pos, v_dir = 'none', 1.0, None, None, 0.0
         if result.multi_hand_landmarks:
             hand = result.multi_hand_landmarks[0]
             draw.draw_landmarks(frame, hand, mp.solutions.hands.HAND_CONNECTIONS)
@@ -390,6 +424,10 @@ def main():
             label, conf = labels[int(probs.argmax())], float(probs.max())
             tip = 8 if CURSOR == 'point' else 9   # 검지 커서면 검지 끝, 손바닥 커서면 가운뎃손가락 뿌리
             pos = (hand.landmark[tip].x, hand.landmark[tip].y)
+            palm_pos = (hand.landmark[9].x, hand.landmark[9].y)   # 스크롤은 손가락 끝이 아니라 손 전체(가운뎃손가락 뿌리) 위치로
+            geo_v, v_dir = v_shape_dir(hand)
+            if geo_v and now_scrolling(time.time()):
+                label, conf = SCROLL, 1.0   # 스크롤 도중 손을 돌려도(모델이 브이로 못 알아봐도) 스크롤 유지
         now = time.time()
         if meter:
             meter.check_timeout(now)
@@ -411,7 +449,11 @@ def main():
                 if pyautogui:
                     pyautogui.moveTo(x, y)
             elif kind == 'scroll':
-                n = mapper.scroll(now, act[1], args.scroll_gain, args.scroll_invert)
+                last_scroll_t = now
+                if args.scroll_mode == 'tilt':
+                    n = mapper.scroll_tilt(now, v_dir, args.scroll_speed, args.scroll_invert)
+                else:
+                    n = mapper.scroll(now, palm_pos or act[1], args.scroll_gain, args.scroll_invert)
                 if n:
                     last_action, last_action_t = f'SCROLL {n:+d}', now
                     if pyautogui:
