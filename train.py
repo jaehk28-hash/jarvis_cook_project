@@ -122,7 +122,7 @@ def evaluate(model, loss_fn, x, y):
     return loss, (pred == y).float().mean().item(), pred
 
 
-COMMANDS = ['thumb', 'v', 'point', 'fist']  # 실제로 키/마우스를 움직이는 동작 (palm은 이제 비명령)
+COMMANDS = ['thumb', 'v', 'point', 'palm']  # 실제로 키/마우스를 움직이는 동작 (point = 커서 이동, palm = 클릭, fist는 이제 비명령)
 
 
 def predict_probs(model, x):

@@ -8,9 +8,10 @@ from datetime import datetime
 # 동작 -> 키보드 키 (유튜브 기준: k = 재생/일시정지, 왼쪽 화살표 = 5초 뒤로)
 KEYS = {'thumb': 'k', 'v': 'left'}
 CURSOR = 'point'  # 커서 이동 동작. model.pt에 point가 없으면(예전 모델) main()에서 'palm'으로 바꿉니다
-COMMANDS = ['thumb', 'v', CURSOR, 'fist']
+CLICK = 'palm'   # 클릭 동작(보자기). 예전 model.pt(point 없음)면 main()에서 'fist'로 바꿉니다
+COMMANDS = ['thumb', 'v', CURSOR, CLICK]
 # 반응 시간 측정: 키보드 숫자 -> 잴 동작
-REACTION_KEYS = {ord('1'): 'thumb', ord('2'): 'v', ord('3'): 'CURSOR', ord('4'): 'fist'}  # 'CURSOR'는 실행 시 커서 동작으로 바뀜
+REACTION_KEYS = {ord('1'): 'thumb', ord('2'): 'v', ord('3'): 'CURSOR', ord('4'): 'CLICK'}  # 'CURSOR'는 실행 시 커서 동작으로 바뀜
 REACTION_TIMEOUT = 10.0  # 이 시간(초) 안에 실행되지 않으면 그 측정은 버립니다
 
 
@@ -78,11 +79,11 @@ class Controller:
                 actions.append(('move', pos))
                 self.last_cursor_t = t
                 self.fist_start = None
-            elif lab == 'fist':
+            elif lab == CLICK:
                 self.last_cursor_t = t
                 if self.fist_start is None:
                     self.fist_start = t
-                if cand == 'fist' and self.locked != 'fist':
+                if cand == CLICK and self.locked != CLICK:
                     target = None  # 주먹을 쥐기 직전의 커서 위치에서 클릭
                     for tt, p in reversed(self.pos_hist):
                         if tt <= self.fist_start - self.click_lag:
@@ -91,7 +92,7 @@ class Controller:
                     if target is None and self.pos_hist:
                         target = self.pos_hist[0][1]
                     actions.append(('click', target))
-                    self.locked, self.unlock_frames = 'fist', 0
+                    self.locked, self.unlock_frames = CLICK, 0
                     self.hist.clear()
                     self.fist_start = None
             if t - self.last_cursor_t > self.exit_after:
@@ -113,7 +114,7 @@ class NoGateController:
         if label == CURSOR and pos is not None:
             self.palm_pos = pos
             return [('move', pos)]
-        if label == 'fist':
+        if label == CLICK:
             return [('click', self.palm_pos or pos)]
         return []
 
@@ -124,7 +125,7 @@ def executed_gesture(act, entered_cursor):
         return CURSOR if entered_cursor else None
     if act[0] == 'key':
         return next((g for g, k in KEYS.items() if k == act[1]), None)
-    return {'move': CURSOR, 'click': 'fist'}.get(act[0])
+    return {'move': CURSOR, 'click': CLICK}.get(act[0])
 
 
 class Meter:
@@ -175,8 +176,8 @@ class Meter:
         if gesture == CURSOR and state == 'cursor':
             print('이미 커서 모드입니다. 손을 내려 normal 모드가 된 뒤 3을 누르세요.')
             return
-        if gesture == 'fist' and state == 'normal':
-            print('참고: 주먹 클릭은 커서 모드에서만 됩니다. 측정 시간에 손바닥으로 커서 모드를 켜는 시간이 포함됩니다.')
+        if gesture == CLICK and state == 'normal':
+            print(f'참고: {CLICK} 클릭은 커서 모드에서만 됩니다. 측정 시간에 {CURSOR}로 커서 모드를 켜는 시간이 포함됩니다.')
         self.pending = (gesture, t)
         print(f'반응 시간 측정 시작: {gesture}')
 
@@ -255,7 +256,7 @@ class CursorMapper:
         손을 다시 가운데로 가져와도 커서가 튀지 않습니다.
     absolute: 카메라 가운데 area 영역을 화면 전체에 대응시킵니다 (area가 작을수록 팔을 덜 움직임)."""
 
-    def __init__(self, w, h, mode='relative', gain=2.5, area=0.4, start=None, gain_y=1.5, center_y=0.4):
+    def __init__(self, w, h, mode='relative', gain=1.2, area=0.4, start=None, gain_y=1.2, center_y=0.4):
         self.w, self.h, self.mode, self.gain, self.area = w, h, mode, gain, area
         self.gain_y, self.center_y = gain_y, center_y  # 세로는 손을 내릴 공간이 좁아서 더 민감하게
         self.cursor = start or (w / 2, h / 2)
@@ -274,12 +275,12 @@ class CursorMapper:
         else:
             if self.prev_t is None or t - self.prev_t > 0.25:
                 self.prev_hand = pos            # 연결이 끊겼다가 다시 시작: 커서는 그대로
-            hx = 0.5 * self.prev_hand[0] + 0.5 * pos[0]   # 손 떨림을 줄이는 평균
-            hy = 0.5 * self.prev_hand[1] + 0.5 * pos[1]
+            hx = 0.65 * self.prev_hand[0] + 0.35 * pos[0]   # 손 떨림을 줄이는 평균 (검지 끝은 더 떨려서 더 강하게)
+            hy = 0.65 * self.prev_hand[1] + 0.35 * pos[1]
             dx, dy = hx - self.prev_hand[0], hy - self.prev_hand[1]
             speed = (dx * dx + dy * dy) ** 0.5
-            if speed > 0.0015:                  # 아주 작은 떨림은 무시
-                accel = 1.0 + min(speed / 0.01, 2.0)   # 빠르게 움직이면 최대 3배
+            if speed > 0.002:                   # 아주 작은 떨림은 무시
+                accel = 1.0 + min(speed / 0.02, 0.5)   # 빠르게 움직이면 최대 1.5배
                 k = self.gain * accel
                 self.cursor = (self.cursor[0] + dx * self.w * k, self.cursor[1] + dy * self.h * k * self.gain_y)
             self.prev_hand = (hx, hy)
@@ -309,9 +310,9 @@ def main():
     parser.add_argument('--gate-off', action='store_true', help='신뢰도/유지시간 게이트를 끄고 매 프레임 예측대로 실행')
     parser.add_argument('--cursor', choices=['relative', 'absolute'], default='relative',
                         help='relative: 마우스처럼 움직인 만큼 이동(기본) / absolute: 손 위치 = 화면 위치')
-    parser.add_argument('--gain', type=float, default=2.5, help='relative 모드 감도 (클수록 조금만 움직여도 멀리 감)')
+    parser.add_argument('--gain', type=float, default=1.2, help='relative 모드 감도 (클수록 조금만 움직여도 멀리 감)')
     parser.add_argument('--area', type=float, default=0.4, help='absolute 모드에서 화면 전체에 대응할 카메라 영역 비율 (예전 값 0.7)')
-    parser.add_argument('--gain-y', type=float, default=1.5, help='세로 감도 배수 (아래쪽이 잘 안 가면 키움)')
+    parser.add_argument('--gain-y', type=float, default=1.2, help='세로 감도 배수 (아래쪽이 잘 안 가면 키움)')
     parser.add_argument('--center-y', type=float, default=0.4, help='absolute 모드 영역의 세로 중심 (작을수록 위쪽)')
     args = parser.parse_args()
 
@@ -320,13 +321,16 @@ def main():
     from collect import normalize  # 데이터 수집 때와 똑같은 전처리를 씁니다
 
     labels, predict = load_model(args.model)
-    global CURSOR, COMMANDS
+    global CURSOR, CLICK, COMMANDS
     CURSOR = 'point' if 'point' in labels else 'palm'   # 예전 model.pt(6개 동작)는 손바닥 커서 그대로
-    COMMANDS[:] = ['thumb', 'v', CURSOR, 'fist']
+    CLICK = 'palm' if 'point' in labels else 'fist'     # 새 모델: 검지 이동 + 보자기 클릭 / 예전: 손바닥 이동 + 주먹 클릭
+    COMMANDS[:] = ['thumb', 'v', CURSOR, CLICK]
     for k, g in list(REACTION_KEYS.items()):
         if g == 'CURSOR':
             REACTION_KEYS[k] = CURSOR
-    print('커서 동작:', CURSOR)
+        elif g == 'CLICK':
+            REACTION_KEYS[k] = CLICK
+    print('커서 동작:', CURSOR, '/ 클릭 동작:', CLICK)
     ctl = NoGateController() if args.gate_off else Controller(thresh=args.thresh, window=args.window)
     pyautogui = None
     if args.live:
