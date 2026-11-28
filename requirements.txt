@@ -3,3 +3,5 @@ opencv-contrib-python<4.11
 mediapipe==0.10.14
 torch
 pandas
+pyautogui
+scikit-learn
