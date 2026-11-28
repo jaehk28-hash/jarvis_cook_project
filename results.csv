@@ -8,3 +8,6 @@ mlp_cmd_only,test_1+test_2+test_3,,0.6373,,1.0000,0.5381,0.8380
 logreg,test_1+test_2+test_3,0.6555,0.6996,0.7149,0.1248,0.0165,0.4863
 random_forest,test_1+test_2+test_3,0.6486,0.6907,0.7186,0.0507,0.0033,0.4441
 mlp,test_1+test_3+test4_1+test_5+test_6,0.8666,0.9063,0.8598,0.1863,0.0250,0.8192
+mlp,test_1+test_3+test_4+test_5+test_6+test_7+test_8+test_9,0.8448,0.9186,0.8555,0.0815,0.0186,0.8599
+logreg,test_1+test_3+test_4+test_5+test_6+test_7+test_8+test_9,0.7725,0.8551,0.7695,0.1280,0.0272,0.5975
+random_forest,test_1+test_3+test_4+test_5+test_6+test_7+test_8+test_9,0.8054,0.8913,0.8190,0.0573,0.0012,0.6261
