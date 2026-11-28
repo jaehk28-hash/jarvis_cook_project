@@ -6,10 +6,11 @@ from collections import Counter, deque
 from datetime import datetime
 
 # 동작 -> 키보드 키 (유튜브 기준: k = 재생/일시정지, 왼쪽 화살표 = 5초 뒤로)
-KEYS = {'thumb': 'k', 'v': 'left'}
+KEYS = {'thumb': 'k', 'v': 'left'}   # 모델에 three/four가 있으면 main()에서 {'thumb':'k','three':'left','four':'right'}로 바뀜
 CURSOR = 'point'  # 커서 이동 동작. model.pt에 point가 없으면(예전 모델) main()에서 'palm'으로 바꿉니다
 CLICK = 'palm'   # 클릭 동작(보자기). 예전 model.pt(point 없음)면 main()에서 'fist'로 바꿉니다
 COMMANDS = ['thumb', 'v', CURSOR, CLICK]
+SCROLL = 'v'     # 커서 모드에서 브이(두 손가락)를 위아래로 움직이면 스크롤 (트랙패드 두 손가락처럼)
 # 반응 시간 측정: 키보드 숫자 -> 잴 동작
 REACTION_KEYS = {ord('1'): 'thumb', ord('2'): 'v', ord('3'): 'CURSOR', ord('4'): 'CLICK'}  # 'CURSOR'는 실행 시 커서 동작으로 바뀜
 REACTION_TIMEOUT = 10.0  # 이 시간(초) 안에 실행되지 않으면 그 측정은 버립니다
@@ -69,7 +70,7 @@ class Controller:
                 self.last_fire[cand] = t
                 self.locked, self.unlock_frames = cand, 0
                 self.hist.clear()
-            elif cand == CURSOR:
+            elif cand == CURSOR or (cand == SCROLL and SCROLL not in KEYS):   # 검지 또는 (브이가 키가 아니면) 브이로 커서 모드
                 self.state, self.last_cursor_t, self.fist_start = 'cursor', t, None
                 self.locked, self.unlock_frames = None, 0
                 self.hist.clear()
@@ -77,6 +78,10 @@ class Controller:
             if move_lab == CURSOR and pos is not None:
                 self.pos_hist.append((t, pos))
                 actions.append(('move', pos))
+                self.last_cursor_t = t
+                self.fist_start = None
+            elif move_lab == SCROLL and pos is not None:
+                actions.append(('scroll', pos))
                 self.last_cursor_t = t
                 self.fist_start = None
             elif lab == CLICK:
@@ -111,6 +116,8 @@ class NoGateController:
     def update(self, t, label, conf, pos):
         if label in KEYS:
             return [('key', KEYS[label])]
+        if label == SCROLL and pos is not None:
+            return [('scroll', pos)]
         if label == CURSOR and pos is not None:
             self.palm_pos = pos
             return [('move', pos)]
@@ -299,6 +306,21 @@ class CursorMapper:
     def jump(self, xy):
         self.cursor = self._clip(*xy)
 
+    def scroll(self, t, pos, gain=150, invert=False):
+        """브이 손을 위아래로 움직인 만큼 스크롤 칸 수를 돌려줍니다. 손을 내리면 페이지가 아래로 내려갑니다.
+        0.25초 넘게 끊기면 새로 시작하므로 손을 다시 위로 가져와도 반대로 스크롤되지 않습니다."""
+        if getattr(self, 's_prev_t', None) is None or t - self.s_prev_t > 0.25:
+            self.s_prev_y, self.s_acc = pos[1], 0.0
+        y = 0.65 * self.s_prev_y + 0.35 * pos[1]
+        dy = y - self.s_prev_y
+        self.s_prev_y, self.s_prev_t = y, t
+        if abs(dy) < 0.002:
+            return 0
+        self.s_acc += -dy * gain * (-1 if invert else 1)
+        n = int(self.s_acc)
+        self.s_acc -= n
+        return n
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -312,6 +334,8 @@ def main():
                         help='relative: 마우스처럼 움직인 만큼 이동(기본) / absolute: 손 위치 = 화면 위치')
     parser.add_argument('--gain', type=float, default=1.2, help='relative 모드 감도 (클수록 조금만 움직여도 멀리 감)')
     parser.add_argument('--area', type=float, default=0.4, help='absolute 모드에서 화면 전체에 대응할 카메라 영역 비율 (예전 값 0.7)')
+    parser.add_argument('--scroll-gain', type=float, default=150, help='스크롤 감도 (커서 모드에서 브이로 스크롤)')
+    parser.add_argument('--scroll-invert', action='store_true', help='스크롤 방향 반대로')
     parser.add_argument('--gain-y', type=float, default=1.2, help='세로 감도 배수 (아래쪽이 잘 안 가면 키움)')
     parser.add_argument('--center-y', type=float, default=0.4, help='absolute 모드 영역의 세로 중심 (작을수록 위쪽)')
     args = parser.parse_args()
@@ -325,6 +349,10 @@ def main():
     CURSOR = 'point' if 'point' in labels else 'palm'   # 예전 model.pt(6개 동작)는 손바닥 커서 그대로
     CLICK = 'palm' if 'point' in labels else 'fist'     # 새 모델: 검지 이동 + 보자기 클릭 / 예전: 손바닥 이동 + 주먹 클릭
     COMMANDS[:] = ['thumb', 'v', CURSOR, CLICK]
+    if 'three' in labels and 'four' in labels:   # 손가락 3 = 5초 전, 4 = 5초 후, 브이 = 언제든 스크롤
+        KEYS.clear(); KEYS.update({'thumb': 'k', 'three': 'left', 'four': 'right'})
+        COMMANDS[:] = ['thumb', 'v', CURSOR, CLICK, 'three', 'four']
+    print('키 동작:', KEYS)
     for k, g in list(REACTION_KEYS.items()):
         if g == 'CURSOR':
             REACTION_KEYS[k] = CURSOR
@@ -382,6 +410,12 @@ def main():
                 x, y = mapper.move(now, act[1])
                 if pyautogui:
                     pyautogui.moveTo(x, y)
+            elif kind == 'scroll':
+                n = mapper.scroll(now, act[1], args.scroll_gain, args.scroll_invert)
+                if n:
+                    last_action, last_action_t = f'SCROLL {n:+d}', now
+                    if pyautogui:
+                        pyautogui.scroll(n)
             elif kind == 'click':
                 last_action, last_action_t = 'CLICK', now
                 x, y = mapper.click_point(act[1])
