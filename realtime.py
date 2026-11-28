@@ -381,7 +381,7 @@ def main():
             break
         frame = cv2.flip(frame, 1)
         result = hands.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        label, conf, pos = 'none', 1.0, None
+        label, conf, pos, palm_pos = 'none', 1.0, None, None
         if result.multi_hand_landmarks:
             hand = result.multi_hand_landmarks[0]
             draw.draw_landmarks(frame, hand, mp.solutions.hands.HAND_CONNECTIONS)
@@ -390,6 +390,7 @@ def main():
             label, conf = labels[int(probs.argmax())], float(probs.max())
             tip = 8 if CURSOR == 'point' else 9   # 검지 커서면 검지 끝, 손바닥 커서면 가운뎃손가락 뿌리
             pos = (hand.landmark[tip].x, hand.landmark[tip].y)
+            palm_pos = (hand.landmark[9].x, hand.landmark[9].y)   # 스크롤은 손가락 끝이 아니라 손 전체(가운뎃손가락 뿌리) 위치로
         now = time.time()
         if meter:
             meter.check_timeout(now)
@@ -411,7 +412,7 @@ def main():
                 if pyautogui:
                     pyautogui.moveTo(x, y)
             elif kind == 'scroll':
-                n = mapper.scroll(now, act[1], args.scroll_gain, args.scroll_invert)
+                n = mapper.scroll(now, palm_pos or act[1], args.scroll_gain, args.scroll_invert)
                 if n:
                     last_action, last_action_t = f'SCROLL {n:+d}', now
                     if pyautogui:
