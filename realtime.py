@@ -1,6 +1,8 @@
 import argparse
 import csv
+import json
 import os
+import sys
 import time
 from collections import Counter, deque
 from datetime import datetime
@@ -370,7 +372,16 @@ def main():
     parser.add_argument('--scroll-invert', action='store_true', help='스크롤 방향 반대로')
     parser.add_argument('--gain-y', type=float, default=1.2, help='세로 감도 배수 (아래쪽이 잘 안 가면 키움)')
     parser.add_argument('--center-y', type=float, default=0.4, help='absolute 모드 영역의 세로 중심 (작을수록 위쪽)')
+    # 컴퓨터마다 다른 감도는 settings.json에 저장해 두면 자동으로 읽습니다 (명령줄 옵션이 있으면 그게 우선)
+    if os.path.exists('settings.json'):
+        with open('settings.json', encoding='utf-8') as f:
+            saved = {k.replace('-', '_'): v for k, v in json.load(f).items()}
+        parser.set_defaults(**saved)
+        print('settings.json 적용:', saved)
     args = parser.parse_args()
+    # pyautogui.scroll의 단위가 운영체제마다 다릅니다: 맥은 1 = 한 줄, 윈도우는 120 = 휠 한 칸(약 3줄).
+    # 그래서 윈도우에서는 40을 곱해 '한 줄' 단위로 맞춥니다. 이제 같은 --scroll-speed가 두 OS에서 비슷하게 움직입니다.
+    scroll_unit = 40 if sys.platform.startswith('win') else 1
 
     import cv2
     import mediapipe as mp
@@ -457,7 +468,7 @@ def main():
                 if n:
                     last_action, last_action_t = f'SCROLL {n:+d}', now
                     if pyautogui:
-                        pyautogui.scroll(n)
+                        pyautogui.scroll(n * scroll_unit)
             elif kind == 'click':
                 last_action, last_action_t = 'CLICK', now
                 x, y = mapper.click_point(act[1])

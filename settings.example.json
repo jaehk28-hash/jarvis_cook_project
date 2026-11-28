@@ -1,0 +1,8 @@
+{
+  "gain": 1.2,
+  "gain_y": 1.2,
+  "scroll_speed": 15,
+  "scroll_invert": false,
+  "thresh": 0.8,
+  "window": 0.5
+}
