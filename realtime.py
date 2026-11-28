@@ -7,9 +7,10 @@ from datetime import datetime
 
 # 동작 -> 키보드 키 (유튜브 기준: k = 재생/일시정지, 왼쪽 화살표 = 5초 뒤로)
 KEYS = {'thumb': 'k', 'v': 'left'}
-COMMANDS = ['thumb', 'v', 'palm', 'fist']
+CURSOR = 'point'  # 커서 이동 동작. model.pt에 point가 없으면(예전 모델) main()에서 'palm'으로 바꿉니다
+COMMANDS = ['thumb', 'v', CURSOR, 'fist']
 # 반응 시간 측정: 키보드 숫자 -> 잴 동작
-REACTION_KEYS = {ord('1'): 'thumb', ord('2'): 'v', ord('3'): 'palm', ord('4'): 'fist'}
+REACTION_KEYS = {ord('1'): 'thumb', ord('2'): 'v', ord('3'): 'CURSOR', ord('4'): 'fist'}  # 'CURSOR'는 실행 시 커서 동작으로 바뀜
 REACTION_TIMEOUT = 10.0  # 이 시간(초) 안에 실행되지 않으면 그 측정은 버립니다
 
 
@@ -67,12 +68,12 @@ class Controller:
                 self.last_fire[cand] = t
                 self.locked, self.unlock_frames = cand, 0
                 self.hist.clear()
-            elif cand == 'palm':
+            elif cand == CURSOR:
                 self.state, self.last_cursor_t, self.fist_start = 'cursor', t, None
                 self.locked, self.unlock_frames = None, 0
                 self.hist.clear()
         else:  # cursor
-            if move_lab == 'palm' and pos is not None:
+            if move_lab == CURSOR and pos is not None:
                 self.pos_hist.append((t, pos))
                 actions.append(('move', pos))
                 self.last_cursor_t = t
@@ -109,7 +110,7 @@ class NoGateController:
     def update(self, t, label, conf, pos):
         if label in KEYS:
             return [('key', KEYS[label])]
-        if label == 'palm' and pos is not None:
+        if label == CURSOR and pos is not None:
             self.palm_pos = pos
             return [('move', pos)]
         if label == 'fist':
@@ -120,10 +121,10 @@ class NoGateController:
 def executed_gesture(act, entered_cursor):
     """이번 실행이 어느 명령 동작인지 돌려줍니다. 손바닥은 커서 모드가 켜지는(게이트를 끄면 커서가 움직이는) 순간입니다."""
     if act is None:
-        return 'palm' if entered_cursor else None
+        return CURSOR if entered_cursor else None
     if act[0] == 'key':
         return next((g for g, k in KEYS.items() if k == act[1]), None)
-    return {'move': 'palm', 'click': 'fist'}.get(act[0])
+    return {'move': CURSOR, 'click': 'fist'}.get(act[0])
 
 
 class Meter:
@@ -171,7 +172,7 @@ class Meter:
             self.print_average()
 
     def start_reaction(self, t, gesture, state):
-        if gesture == 'palm' and state == 'cursor':
+        if gesture == CURSOR and state == 'cursor':
             print('이미 커서 모드입니다. 손을 내려 normal 모드가 된 뒤 3을 누르세요.')
             return
         if gesture == 'fist' and state == 'normal':
@@ -238,11 +239,64 @@ def load_model(path):
     return labels, predict
 
 
-def to_screen(pos, w, h):
-    """카메라 화면의 가운데 70% 영역을 모니터 전체로 늘려서 대응시킵니다."""
-    x = min(max((pos[0] - 0.15) / 0.7, 0.0), 1.0) * w
-    y = min(max((pos[1] - 0.15) / 0.7, 0.0), 1.0) * h
+def to_screen(pos, w, h, area=0.7, center_y=0.5):
+    """카메라 화면의 area 비율 영역을 모니터 전체로 늘려서 대응시킵니다 (절대 모드).
+    center_y를 0.5보다 작게 하면 영역이 위로 올라가서, 손을 카메라 아래 끝까지 내리지 않아도 화면 아래에 닿습니다."""
+    lo_x, lo_y = 0.5 - area / 2, center_y - area / 2
+    x = min(max((pos[0] - lo_x) / area, 0.0), 1.0) * w
+    y = min(max((pos[1] - lo_y) / area, 0.0), 1.0) * h
     return min(max(x, 6), w - 6), min(max(y, 6), h - 6)  # 모서리(안전 정지)를 피함
+
+
+class CursorMapper:
+    """손 위치 -> 커서 위치.
+    relative(기본): 마우스처럼 손이 움직인 만큼(× gain) 커서가 움직입니다. 빨리 움직이면 더 멀리 갑니다.
+        손바닥을 잠깐(0.25초) 멈추거나 내리면 '마우스를 들어 올린' 것처럼 연결이 끊겨서,
+        손을 다시 가운데로 가져와도 커서가 튀지 않습니다.
+    absolute: 카메라 가운데 area 영역을 화면 전체에 대응시킵니다 (area가 작을수록 팔을 덜 움직임)."""
+
+    def __init__(self, w, h, mode='relative', gain=2.5, area=0.4, start=None, gain_y=1.5, center_y=0.4):
+        self.w, self.h, self.mode, self.gain, self.area = w, h, mode, gain, area
+        self.gain_y, self.center_y = gain_y, center_y  # 세로는 손을 내릴 공간이 좁아서 더 민감하게
+        self.cursor = start or (w / 2, h / 2)
+        self.prev_hand = None   # 직전 손 위치 (부드럽게 만든 값)
+        self.prev_t = None
+        self.hist = []          # (손 위치 원본, 커서 위치): 클릭 위치를 되찾는 데 씀
+
+    def _clip(self, x, y):
+        return min(max(x, 6), self.w - 6), min(max(y, 6), self.h - 6)
+
+    def move(self, t, pos):
+        if self.mode == 'absolute':
+            x, y = to_screen(pos, self.w, self.h, self.area, self.center_y)
+            cx, cy = self.cursor
+            self.cursor = (0.65 * cx + 0.35 * x, 0.65 * cy + 0.35 * y)
+        else:
+            if self.prev_t is None or t - self.prev_t > 0.25:
+                self.prev_hand = pos            # 연결이 끊겼다가 다시 시작: 커서는 그대로
+            hx = 0.5 * self.prev_hand[0] + 0.5 * pos[0]   # 손 떨림을 줄이는 평균
+            hy = 0.5 * self.prev_hand[1] + 0.5 * pos[1]
+            dx, dy = hx - self.prev_hand[0], hy - self.prev_hand[1]
+            speed = (dx * dx + dy * dy) ** 0.5
+            if speed > 0.0015:                  # 아주 작은 떨림은 무시
+                accel = 1.0 + min(speed / 0.01, 2.0)   # 빠르게 움직이면 최대 3배
+                k = self.gain * accel
+                self.cursor = (self.cursor[0] + dx * self.w * k, self.cursor[1] + dy * self.h * k * self.gain_y)
+            self.prev_hand = (hx, hy)
+        self.prev_t = t
+        self.cursor = self._clip(*self.cursor)
+        self.hist = (self.hist + [(pos, self.cursor)])[-90:]
+        return self.cursor
+
+    def click_point(self, target):
+        """컨트롤러가 고른 '주먹 쥐기 직전'의 손 위치에 대응하던 커서 위치를 돌려줍니다."""
+        for p, c in reversed(self.hist):
+            if p is target or p == target:
+                return c
+        return self.cursor
+
+    def jump(self, xy):
+        self.cursor = self._clip(*xy)
 
 
 def main():
@@ -253,6 +307,12 @@ def main():
     parser.add_argument('--window', type=float, default=0.5, help='유지시간(초)')
     parser.add_argument('--log', action='store_true', help='실행 기록과 측정 기능 켜기 (r: 측정, 1~4: 반응 시간)')
     parser.add_argument('--gate-off', action='store_true', help='신뢰도/유지시간 게이트를 끄고 매 프레임 예측대로 실행')
+    parser.add_argument('--cursor', choices=['relative', 'absolute'], default='relative',
+                        help='relative: 마우스처럼 움직인 만큼 이동(기본) / absolute: 손 위치 = 화면 위치')
+    parser.add_argument('--gain', type=float, default=2.5, help='relative 모드 감도 (클수록 조금만 움직여도 멀리 감)')
+    parser.add_argument('--area', type=float, default=0.4, help='absolute 모드에서 화면 전체에 대응할 카메라 영역 비율 (예전 값 0.7)')
+    parser.add_argument('--gain-y', type=float, default=1.5, help='세로 감도 배수 (아래쪽이 잘 안 가면 키움)')
+    parser.add_argument('--center-y', type=float, default=0.4, help='absolute 모드 영역의 세로 중심 (작을수록 위쪽)')
     args = parser.parse_args()
 
     import cv2
@@ -260,6 +320,13 @@ def main():
     from collect import normalize  # 데이터 수집 때와 똑같은 전처리를 씁니다
 
     labels, predict = load_model(args.model)
+    global CURSOR, COMMANDS
+    CURSOR = 'point' if 'point' in labels else 'palm'   # 예전 model.pt(6개 동작)는 손바닥 커서 그대로
+    COMMANDS[:] = ['thumb', 'v', CURSOR, 'fist']
+    for k, g in list(REACTION_KEYS.items()):
+        if g == 'CURSOR':
+            REACTION_KEYS[k] = CURSOR
+    print('커서 동작:', CURSOR)
     ctl = NoGateController() if args.gate_off else Controller(thresh=args.thresh, window=args.window)
     pyautogui = None
     if args.live:
@@ -272,7 +339,9 @@ def main():
     hands = mp.solutions.hands.Hands(max_num_hands=1)
     draw = mp.solutions.drawing_utils
     cap = cv2.VideoCapture(0)
-    smooth, last_action, last_action_t, prev_t = None, '', 0.0, time.time()
+    start_xy = tuple(pyautogui.position()) if pyautogui else None
+    mapper = CursorMapper(screen_w, screen_h, args.cursor, args.gain, args.area, start_xy, args.gain_y, args.center_y)
+    last_action, last_action_t, prev_t = '', 0.0, time.time()
     meter = Meter(prev_t) if args.log else None
     while True:
         ok, frame = cap.read()
@@ -287,7 +356,8 @@ def main():
             is_left = result.multi_handedness[0].classification[0].label == 'Left'
             probs = predict(normalize(hand, is_left))
             label, conf = labels[int(probs.argmax())], float(probs.max())
-            pos = (hand.landmark[9].x, hand.landmark[9].y)
+            tip = 8 if CURSOR == 'point' else 9   # 검지 커서면 검지 끝, 손바닥 커서면 가운뎃손가락 뿌리
+            pos = (hand.landmark[tip].x, hand.landmark[tip].y)
         now = time.time()
         if meter:
             meter.check_timeout(now)
@@ -305,21 +375,23 @@ def main():
                 if pyautogui:
                     pyautogui.press(act[1])
             elif kind == 'move':
-                x, y = to_screen(act[1], screen_w, screen_h)
-                smooth = (x, y) if smooth is None else (0.65 * smooth[0] + 0.35 * x, 0.65 * smooth[1] + 0.35 * y)
+                x, y = mapper.move(now, act[1])
                 if pyautogui:
-                    pyautogui.moveTo(smooth[0], smooth[1])
+                    pyautogui.moveTo(x, y)
             elif kind == 'click':
                 last_action, last_action_t = 'CLICK', now
-                if pyautogui and act[1] is not None:
-                    x, y = to_screen(act[1], screen_w, screen_h)
+                x, y = mapper.click_point(act[1])
+                mapper.jump((x, y))
+                if pyautogui:
                     pyautogui.click(x, y)
-                    smooth = (x, y)
         fps = 1.0 / max(now - prev_t, 1e-6)
         prev_t = now
         mode = 'LIVE' if args.live else 'DRY (no control)'
         if args.gate_off:
             mode += '  GATE OFF'
+        mode += f'  cursor {args.cursor}'
+        if pos is not None:
+            mode += f'  hand y {pos[1]:.2f}'
         lines = [f'{mode}  fps {fps:.0f}',
                  f'pred: {label} {conf:.2f}   mode: {ctl.state}',
                  f'last: {last_action}' if now - last_action_t < 1.5 else 'last: -']

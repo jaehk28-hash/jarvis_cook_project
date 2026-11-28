@@ -3,7 +3,7 @@ import os
 import sys
 
 # 키 1~6을 누르면 그 동작을 기록하기 시작하고, 0을 누르면 기록을 멈춥니다. q는 종료.
-LABELS = {'1': 'thumb', '2': 'v', '3': 'cook', '4': 'idle', '5': 'palm', '6': 'fist'}
+LABELS = {'1': 'thumb', '2': 'v', '3': 'cook', '4': 'idle', '5': 'palm', '6': 'fist', '7': 'point'}  # 7 = 검지만 펴기(커서)
 
 
 def normalize(hand, is_left):

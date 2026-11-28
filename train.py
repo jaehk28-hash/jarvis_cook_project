@@ -10,7 +10,7 @@ import torch
 import torch.nn as nn
 
 # collect.py의 동작 이름과 같아야 합니다. 모델 출력 번호 = 이 목록의 순서입니다.
-LABELS = ['thumb', 'v', 'cook', 'idle', 'palm', 'fist']
+LABELS = ['thumb', 'v', 'cook', 'idle', 'palm', 'fist', 'point']  # point = 검지만 펴기 (커서 이동)
 LABEL_TO_ID = {name: i for i, name in enumerate(LABELS)}
 FEATURES = [f'{a}{i}' for i in range(21) for a in 'xyz']  # x0,y0,z0 ... x20,y20,z20 (63개)
 
@@ -122,7 +122,7 @@ def evaluate(model, loss_fn, x, y):
     return loss, (pred == y).float().mean().item(), pred
 
 
-COMMANDS = ['thumb', 'v', 'palm', 'fist']  # 실제로 키/마우스를 움직이는 동작
+COMMANDS = ['thumb', 'v', 'point', 'fist']  # 실제로 키/마우스를 움직이는 동작 (palm은 이제 비명령)
 
 
 def predict_probs(model, x):
